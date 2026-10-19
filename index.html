@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="sv">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spik — lager & inköp</title><link rel="stylesheet" href="/src/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spik — lager & inköp</title><link rel="stylesheet" href="./src/style.css"></head>
 <body>
-  <aside><a class="brand" href="/">▥ <span>spik<span class="brand-dot">.</span></span></a><div class="workspace-label">DIN PRODUKTION</div><div class="nav-active">▦ &nbsp; Spiklager</div><div class="aside-bottom">PLANERA I GOD TID<br><span>En liten detalj.<br>En trygg produktion.</span></div></aside>
+  <aside><a class="brand" href="./">▥ <span>spik<span class="brand-dot">.</span></span></a><div class="workspace-label">DIN PRODUKTION</div><div class="nav-active">▦ &nbsp; Spiklager</div><div class="aside-bottom">PLANERA I GOD TID<br><span>En liten detalj.<br>En trygg produktion.</span></div></aside>
   <main>
     <header><div class="eyebrow">LAGER / INKÖPSPLANERING</div><div class="header-meta" id="date"></div></header>
     <section class="title-row"><div><h1>Full koll på lagret<span>.</span></h1><p>Vet vad du behöver beställa. Innan produktionen stannar.</p></div><button id="add" class="primary">+ Lägg till artikel</button></section>
@@ -22,5 +22,5 @@
     <p class="hint">Förslaget täcker leveranstid + säkerhetslager + extra period. Bekräftade leveranser under perioden dras av och mängden avrundas uppåt till hela förpackningar.</p>
     <h3>03 / Bekräftade leveranser</h3><div id="deliveries"></div><button type="button" id="add-delivery">+ Lägg till leverans</button><p class="hint">”Ta emot” lägger leveransen till lagret. Bekräfta ändringarna med ”Spara artikel”. Försenade leveranser ingår inte i prognosen.</p><label>Anteckningar<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
     <div class="dialog-footer"><button type="button" id="delete" class="danger">Ta bort artikel</button><button class="primary" type="submit">Spara artikel</button></div>
-  </form></dialog><div id="toast" role="status" hidden></div><script type="module" src="/src/app.js"></script>
+  </form></dialog><div id="toast" role="status" hidden></div><script type="module" src="./src/app.js"></script>
 </body></html>

@@ -3,7 +3,22 @@
 Aplikacja dla produkcji palet: artykuły, stany, średnie zużycie, prognozy braków,
 terminy zamówień i potwierdzone dostawy. Interfejs po szwedzku.
 
-## Uruchomienie
+## Otwieranie przez GitHub Pages
+
+Na darmowym planie GitHub repozytorium musi być publiczne.
+
+1. W repozytorium wybierz **Settings → Pages**.
+2. W sekcji **Build and deployment** wybierz **Source: Deploy from a branch**.
+3. Wybierz gałąź **main**, katalog **/ (root)** i kliknij **Save**.
+4. Zaczekaj na zakończenie publikacji. Adres strony pojawi się w **Settings → Pages**.
+
+Standardowy adres to `https://stldynamic.github.io/Spik-R-knare/`.
+Zacznie działać dopiero po włączeniu Pages i pomyślnej publikacji.
+Nie trzeba instalować Node.js, aby korzystać z opublikowanej aplikacji.
+Dane pozostają w przeglądarce, osobno dla danego adresu. Przy zmianie adresu
+wyeksportuj kopię ze starej wersji i zaimportuj ją w nowej.
+
+## Uruchomienie na swoim komputerze
 
 Wymagany Node.js 22 lub nowszy. Brak zależności do instalacji.
 
