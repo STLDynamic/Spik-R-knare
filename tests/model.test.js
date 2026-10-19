@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { forecast, parseBackup, validateArticle, dateAfter } from '../src/model.js';
+const base = {id:'1',name:'2,5 × 45 Slätt',weight:1.8,pack:800,stock:800,usage:140,unit:'kg',period:'week',lead:42,buffer:14,coverage:30,group:'Gładkie',supplier:'',notes:'',deliveries:[]};
+const date='2026-10-19';
+test('800 kg / 1.8 g and ordering whole cartons',()=>{const f=forecast(base,date);assert.ok(Math.abs(f.piecesPerPack-444444.444444)<0.001);assert.equal(f.daysLeft,40);assert.equal(f.orderIn,-16);assert.equal(f.status,'critical');assert.equal(f.orderKg,1600);assert.equal(f.cartons,2);});
+test('piece usage and monthly units',()=>{assert.equal(forecast({...base,usage:70000,unit:'pieces'},date).daily,18);assert.equal(forecast({...base,usage:365.25,period:'month'},date).daily,12);});
+test('on-time supply extends coverage',()=>{const f=forecast({...base,deliveries:[{id:'d',date:dateAfter(date,20),kg:800}]},date);assert.equal(f.shortage,80);assert.equal(f.orderIn,24);assert.equal(f.orderKg,800);assert.equal(f.status,'ok');});
+test('late supply does not hide earlier shortage',()=>{const f=forecast({...base,deliveries:[{id:'d',date:dateAfter(date,45),kg:2000}]},date);assert.equal(f.shortage,40);assert.equal(f.status,'critical');assert.equal(f.orderKg,0);});
+test('overdue deliveries excluded',()=>{const f=forecast({...base,deliveries:[{id:'d',date:'2026-10-18',kg:800}]},date);assert.equal(f.shortage,40);assert.equal(f.overdue.length,1);assert.equal(f.orderKg,1600);});
+test('delivery on depletion day prevents gap',()=>{assert.equal(forecast({...base,deliveries:[{id:'d',date:dateAfter(date,40),kg:800}]},date).shortage,80);});
+test('zero consumption',()=>{const f=forecast({...base,usage:0},date);assert.equal(f.shortage,null);assert.equal(f.orderKg,0);assert.equal(f.status,'idle');});
+test('zero stock',()=>{assert.equal(forecast({...base,stock:0},date).shortage,0);assert.equal(forecast({...base,stock:0},date).status,'critical');});
+test('reorder boundary and exact cartons',()=>{const f=forecast({...base,stock:1120,coverage:40},date);assert.equal(f.orderIn,0);assert.equal(f.status,'order');assert.equal(f.orderKg,800);});
+test('backup validation',()=>{assert.deepEqual(parseBackup(JSON.stringify({version:1,articles:[base]})),[base]);assert.throws(()=>parseBackup(JSON.stringify({version:1,articles:[base,base]})));assert.throws(()=>validateArticle({...base,weight:0}));assert.throws(()=>validateArticle({...base,stock:-1}));assert.throws(()=>validateArticle({...base,deliveries:[{id:'d',date:'2026-02-30',kg:10}]}));assert.throws(()=>parseBackup('{"version":2,"articles":[]}'));});
