@@ -1,7 +1,8 @@
 # Spik — planowanie zapotrzebowania na gwoździe
 
-Aplikacja dla produkcji palet: artykuły, stany, średnie zużycie, prognozy braków,
-terminy zamówień i potwierdzone dostawy. Interfejs po szwedzku.
+Aplikacja dla produkcji palet: artykuły, stany, historia ruchów, miesięczne plany
+zużycia w sztukach, prognozy braków, terminy zamówień i potwierdzone dostawy.
+Interfejs po szwedzku.
 
 ## Otwieranie przez GitHub Pages
 
@@ -42,6 +43,46 @@ w przeglądarce komputera, na którym działa serwer. Testy obliczeń: `npm test
 5. W „Lager & historik” zapisuj zużycie za okres, przyjęcia i inwentaryzacje.
    Regularnie eksportuj kopie JSON — obejmują także całą historię.
 
+### Miesięczny plan zużycia
+
+Zakładka **„Plan förbrukning”** pokazuje sześć miesięcy naraz. Artykuły są
+w wierszach, a miesiące w kolumnach. Zakres można przesuwać lub wybrać miesiąc
+początkowy. Wyszukiwanie i filtr grup ograniczają widoczne artykuły.
+
+- Wpisz całkowite zaplanowane zużycie w **sztukach** na dany miesiąc.
+  Masa pojedynczego gwoździa przelicza plan na kg: 500 000 szt. × 1,8 g = 900 kg.
+- Puste pole oznacza brak planu: program stosuje średnie zużycie z karty artykułu.
+- Wpisane **0** oznacza świadomie zaplanowany brak zużycia, zastępujący średnią.
+- Zapisz przyciskiem **„Spara plan”**. Dopiero zapis zmienia prognozę magazynu.
+  Niezapisane wpisy pozostają przy przełączaniu zakładek, miesięcy i filtrów.
+  „Återställ ändringar” cofa wszystkie niezapisane zmiany, także niewidoczne.
+- Wyczyszczenie wcześniej zapisanego pola i zapis przywracają używanie średniej.
+- Przed eksportem kopii trzeba zapisać lub odrzucić niezapisane zmiany planu.
+
+Plan dotyczy **całego miesiąca** i nie jest rzeczywistym rozchodem magazynowym.
+Zapisane zużycie z historii pomniejsza miesięczny plan. Pozostała ilość jest
+rozłożona równomiernie na dni tego miesiąca bez zapisanego zużycia, zarówno
+minione, jak i przyszłe. Stan na dzisiaj uwzględnia minione dni od ostatniej
+inwentaryzacji; „Från idag” pokazuje część pozostałą od dzisiaj. Przykładowo:
+plan 2000 kg, zapisane 700 kg za dni 1–10 listopada, daje na 11 listopada
+1300 kg na pozostałe 20 dni. Zużycie nie jest liczone podwójnie.
+
+Jeżeli rzeczywiste zużycie **przekroczy plan**, program ostrzega i stosuje średnią
+na dni bez zapisów. Dni bez produkcji można zapisać jako rzeczywiste zużycie 0;
+przy niezmienionym planie miesięcznym jego pozostała część przypada wtedy na
+pozostałe niezapisane dni. Rzeczywiste zużycie dzisiejszego dnia nie jest
+dodatkowo prognozowane ponownie tego samego dnia.
+
+Prognoza przechodzi przez kolejne miesiące i daty dostaw, uwzględniając różne
+tempa zużycia, rzeczywistą liczbę dni w miesiącu oraz lata przestępne. Dzięki temu
+przyszły wzrost produkcji może wywołać potrzebę zamówienia nawet wtedy, gdy
+bieżący miesiąc ma zerowe zużycie. Podsumowanie kg pod tabelą obejmuje wyłącznie
+widoczne artykuły, z planów lub ze średniej dla pustych pól.
+
+Zmiana planu lub masy gwoździa przelicza szacunki dla niezapisanych dni.
+Nie zmienia rzeczywistych wpisów historii. Program nie dolicza marginesu 500 kg;
+zapas bezpieczeństwa w dniach pozostaje oddzielnym ustawieniem artykułu.
+
 ### Stany i historia
 
 - **Senast inventerat**: ostatni fizycznie policzony stan i data na początek dnia.
@@ -68,19 +109,21 @@ początkowym ani w przyszłość.
 Program pokazuje rzeczywiste średnie zużycie na podstawie zapisanych dni
 z ostatnich 30 dni. Brakujące dni nie są traktowane jako zerowe zużycie.
 Przycisk „Använd som planeringssnitt” pozwala świadomie zastosować tę średnią.
-Zmiana średniej przelicza również szacunki za niezapisane dni od ostatniej
-inwentaryzacji. Zapisane rzeczywiste zużycie pozostaje bez zmian.
+Zmiana średniej przelicza szacunki za niezapisane dni bez miesięcznego planu
+lub z przekroczonym planem. Zapisane rzeczywiste zużycie pozostaje bez zmian.
 
 ### Dotychczasowe dane i kopie
 
-Wersja 2 odczytuje wcześniejsze artykuły i kopie JSON w wersji 1. Ponieważ stara
-wersja nie zapisywała daty salda, trzeba potwierdzić ilość i datę w „Lager & historik”.
+Wersja 3 odczytuje wcześniejsze artykuły i kopie JSON w wersjach 1 i 2, dodając
+puste plany miesięczne. Wersja 1 nie zapisywała daty salda, dlatego po jej
+odczytaniu trzeba potwierdzić ilość i datę w „Lager & historik”.
 Do tego czasu artykuł nie ma aktywnej prognozy zakupów; nie jest pokazywany jako
 zerowy zapas. Nie należy potwierdzać nieaktualnej ilości jako dzisiejszej.
 
-Nowe dane trafiają do `spik.inventory.v2` w pamięci przeglądarki. Stary klucz
-`spik.inventory.v1` nie jest nadpisywany ani usuwany podczas migracji. Kopie JSON
-w wersji 2 zachowują daty, operacje, anulowane wpisy i powiązania z dostawami.
+Nowe dane trafiają do `spik.inventory.v3` w pamięci przeglądarki. Stare klucze
+`spik.inventory.v1` i `spik.inventory.v2` nie są nadpisywane ani usuwane podczas
+migracji. Odczyt preferuje najnowszy dostępny zapis. Kopie JSON w wersji 3 zachowują
+plany, daty, operacje, anulowane wpisy i powiązania z dostawami.
 Nie można ich importować do starej wersji aplikacji — najpierw odśwież program.
 
 Możesz filtrować grupy i statusy, szukać nazw/dostawców i sortować pilność.
@@ -90,16 +133,17 @@ Dane demonstracyjne są opcjonalne. Import zastępuje magazyn po potwierdzeniu.
 
 - Sztuki w opakowaniu = kg × 1000 / masa sztuki w gramach.
   800 kg i 1,8 g daje około 444 444 sztuki.
-- Dzienne zużycie = tygodniowe / 7 lub miesięczne / (365,25 / 12).
+- Średnie dzienne zużycie = tygodniowe / 7 lub miesięczne / (365,25 / 12).
+  Miesięczne plany używają rzeczywistej liczby dni danego miesiąca.
 - Zużycie jest równomierne; dostawy są dostępne na początku wskazanego dnia.
 - Stan na dzisiaj uwzględnia upływ dni od ostatniej inwentaryzacji, zapisane
-  operacje i średnie zużycie na dni bez zapisów. Dzisiejsze faktyczne operacje
+  operacje i miesięczny plan lub średnie zużycie na dni bez zapisów. Dzisiejsze faktyczne operacje
   są już wliczone; szacunki obejmują dni do wczoraj. Szacowany zapas nie spada
   poniżej zera; nadwyżka szacowanego zużycia jest sygnalizowana jako niedobór.
 - Prognoza wskazuje pierwszy brak z uwzględnieniem potwierdzonych dostaw.
   Dostawa po wystąpieniu braku nie usuwa ostrzeżenia o przestoju.
 - Termin zamówienia = pierwszy brak − czas dostawy − bufor.
-- Zakup = zużycie na czas dostawy + bufor + dodatkowy okres, minus stan
+- Zakup = przewidywane zużycie w czasie dostawy + buforu + dodatkowego okresu, minus stan
   i dostawy w tym okresie, zaokrąglone w górę do opakowań.
   Zakup może wynosić zero przy ryzyku braku: trzeba przyspieszyć istniejącą dostawę.
 - Przeterminowane dostawy nie zwiększają prognozowanego zapasu; przyjmij je
@@ -111,7 +155,8 @@ Dane zapisują się lokalnie w przeglądarce, osobno dla każdego adresu aplikac
 Nie ma wspólnej bazy, kont ani synchronizacji między komputerami.
 Usunięcie danych przeglądarki usuwa magazyn — regularnie eksportuj kopie.
 Szacowany stan zmniejsza się z upływem dni, ale nie zastępuje kontroli fizycznej.
-Plan opiera się na średnim zużyciu; nie ma jeszcze harmonogramu produkcji.
+Plan opiera się na miesięcznym zapotrzebowaniu i średniej dla miesięcy bez planu.
+Nie ma jeszcze harmonogramu produkcji poszczególnych typów palet.
 Aplikacja nie wysyła zamówień ani wiadomości do dostawców.
 
 ## Pliki

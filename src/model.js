@@ -1,5 +1,5 @@
 export const DAY = 86400000;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export function today() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 export function dayNumber(date) { return Date.parse(`${date}T00:00:00Z`) / DAY; }
 export function dateAfter(date, days) { return new Date((dayNumber(date) + days) * DAY).toISOString().slice(0,10); }
@@ -30,10 +30,58 @@ export function validateArticle(a) {
   }
   const periods=a.movements.filter(m=>m.type==='usage'&&!m.voided).sort((a,b)=>a.from.localeCompare(b.from));
   for(let i=1;i<periods.length;i++) if(periods[i].from<=periods[i-1].date) throw new Error('Förbrukningsperioder får inte överlappa. Ångra den felaktiga posten först.');
+  if (!a.plans || typeof a.plans !== 'object' || Array.isArray(a.plans)) throw new Error('Ogiltig månadsplan.');
+  for (const [month,pieces] of Object.entries(a.plans)) {
+    if (!validMonth(month) || !Number.isSafeInteger(pieces) || !amount(pieces)) throw new Error('Månadsplanen måste innehålla giltiga månader och hela antal stycken, minst 0.');
+  }
   return a;
 }
 export function dailyUsage(a) { return (a.unit === 'kg' ? a.usage : a.usage * a.weight / 1000) / (a.period === 'week' ? 7 : 365.25/12); }
-export function inventory(a, asOf=today()) {
+export function validMonth(month) { return typeof month==='string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && month>='1900-01' && month<='9998-12'; }
+export function monthAfter(month,offset=1) {
+  const [year,m]=month.split('-').map(Number);
+  return new Date(Date.UTC(year,m-1+offset,1)).toISOString().slice(0,7);
+}
+function overlap(from,to,start,end) { return Math.max(0,Math.min(to,end)-Math.max(from,start)); }
+// Actual periods include both dates. Internal ranges are [start, end).
+function consumptionCalendar(a,asOf) {
+  const actual=a.movements.filter(m=>m.type==='usage'&&!m.voided&&m.date<=asOf).map(m=>({start:dayNumber(m.from),end:dayNumber(m.date)+1,kg:m.kg}));
+  const profiles=new Map();
+  function profile(month) {
+    if(profiles.has(month)) return profiles.get(month);
+    const start=dayNumber(`${month}-01`),end=dayNumber(`${monthAfter(month)}-01`);
+    let actualKg=0,recordedDays=0;
+    for(const m of actual) {const days=overlap(m.start,m.end,start,end);recordedDays+=days;actualKg+=m.kg*days/(m.end-m.start);}
+    const pieces=Object.hasOwn(a.plans,month)?a.plans[month]:null;
+    const plannedKg=pieces===null?null:pieces*a.weight/1000;
+    const exceeded=plannedKg!==null&&actualKg>plannedKg+1e-8;
+    const remainingKg=plannedKg===null?null:Math.max(0,plannedKg-actualKg);
+    const unrecordedDays=end-start-recordedDays;
+    const rate=pieces===null||exceeded?dailyUsage(a):unrecordedDays>0?remainingKg/unrecordedDays:0;
+    const pendingStart=Math.max(start,dayNumber(asOf));
+    const pendingDays=Math.max(0,end-pendingStart)-actual.reduce((sum,m)=>sum+overlap(m.start,m.end,pendingStart,end),0);
+    const value={month,pieces,plannedKg,actualKg,recordedDays,remainingKg,rate,exceeded,totalKg:actualKg+rate*unrecordedDays,source:pieces===null?'average':exceeded?'exceeded':'plan',forecastKg:Math.max(0,pendingDays)*rate};
+    profiles.set(month,value);return value;
+  }
+  function missingDays(start,end) { return end-start-actual.reduce((sum,m)=>sum+overlap(m.start,m.end,start,end),0); }
+  function demand(start,end) {
+    let result=0,cursor=start;
+    while(cursor<end) {
+      const month=new Date(cursor*DAY).toISOString().slice(0,7);
+      const stop=Math.min(end,dayNumber(`${monthAfter(month)}-01`));
+      result+=Math.max(0,missingDays(cursor,stop))*profile(month).rate;
+      cursor=stop;
+    }
+    return result;
+  }
+  function rateAt(day) {
+    if(actual.some(m=>m.start<=day&&day<m.end)) return 0;
+    return profile(new Date(day*DAY).toISOString().slice(0,7)).rate;
+  }
+  return {profile,demand,rateAt,missingDays};
+}
+export function monthlyPlan(a,month,asOf=today()) { return consumptionCalendar(a,asOf).profile(month); }
+export function inventory(a, asOf=today(), calendar=consumptionCalendar(a,asOf)) {
   if (!a.stockDate || a.stockDate > asOf) return { confirmed:false, ledger:a.stock, estimated:null, estimatedDays:0, countDate:null, countKg:null, deficit:0 };
   const active=a.movements.filter(m=>!m.voided && m.date<=asOf);
   // Inventeringar gäller dagens början; dagens uttag och leveranser kommer därefter.
@@ -42,18 +90,16 @@ export function inventory(a, asOf=today()) {
   const countDate=last?.date || a.stockDate;
   const countKg=last?.kg ?? a.stock;
   const start=dayNumber(countDate), end=dayNumber(asOf);
-  let ledger=countKg, coveredDays=0;
+  let ledger=countKg;
   for(const m of active) {
     if(m.type==='receipt' && m.date>=countDate) ledger+=m.kg;
     if(m.type==='usage') {
-      const from=dayNumber(m.from), to=dayNumber(m.date);
-      const actualDays=Math.max(0,Math.min(to,end)-Math.max(from,start)+1);
-      ledger-=m.kg*actualDays/(to-from+1);
-      coveredDays+=Math.max(0,Math.min(to,end-1)-Math.max(from,start)+1);
+      const from=dayNumber(m.from), to=dayNumber(m.date)+1;
+      ledger-=m.kg*overlap(from,to,start,end+1)/(to-from);
     }
   }
-  const estimatedDays=Math.max(0,end-start-coveredDays);
-  const raw=ledger-estimatedDays*dailyUsage(a);
+  const estimatedDays=Math.max(0,calendar.missingDays(start,end));
+  const raw=ledger-calendar.demand(start,end);
   return {confirmed:true,ledger,estimated:Math.max(0,raw),estimatedDays,countDate,countKg,deficit:Math.max(0,-raw)};
 }
 export function usageHistory(a, asOf=today(), days=30) {
@@ -89,35 +135,48 @@ export function voidMovement(a,id) {
   return validateArticle(next);
 }
 export function forecast(a, asOf = today()) {
-  const stock=inventory(a,asOf);
-  const daily=dailyUsage(a);
+  const calendar=consumptionCalendar(a,asOf),currentMonth=calendar.profile(asOf.slice(0,7));
+  const stock=inventory(a,asOf,calendar),daily=currentMonth.rate;
   const overdue=a.deliveries.filter(d=>d.date<asOf);
-  if(!stock.confirmed) return {...stock,daily,overdue,status:'unconfirmed',shortage:null,orderIn:Infinity,orderKg:null,cartons:null,piecesPerPack:a.pack*1000/a.weight};
-  const future=a.deliveries.filter(d=>d.date>=asOf).sort((x,y)=>x.date.localeCompare(y.date));
-  const daysLeft=daily>0 ? stock.estimated/daily : Infinity;
-  let balance=stock.estimated,cursor=0,shortage=null;
-  if(daily>0) {
-    for(const d of future) {
-      const at=dayNumber(d.date)-dayNumber(asOf);
-      if(balance/daily<at-cursor) {shortage=cursor+balance/daily;break;}
-      balance=balance-(at-cursor)*daily+d.kg; cursor=at;
-    }
-    if(shortage===null) shortage=cursor+balance/daily;
+  if(!stock.confirmed) return {...stock,daily,currentMonth,overdue,status:'unconfirmed',shortage:null,orderIn:Infinity,orderKg:null,cartons:null,piecesPerPack:a.pack*1000/a.weight};
+  const start=dayNumber(asOf);
+  const future=a.deliveries.filter(d=>d.date>=asOf);
+  // Demand changes at month boundaries, delivery dates and the end of today's actual usage.
+  const events=new Set([start,start+1]);
+  for(const month of Object.keys(a.plans)) {
+    const from=dayNumber(`${month}-01`),to=dayNumber(`${monthAfter(month)}-01`);
+    if(from>=start)events.add(from);
+    if(to>start)events.add(to);
   }
-  const orderIn=shortage===null ? Infinity : Math.floor(shortage-a.lead-a.buffer);
+  const deliveries=new Map();
+  for(const d of future) {const at=dayNumber(d.date);events.add(at);deliveries.set(at,(deliveries.get(at)||0)+d.kg);}
+  let balance=stock.estimated,cursor=start,shortage=null,hasDemand=false;
+  for(const at of [...events].sort((x,y)=>x-y)) {
+    const rate=calendar.rateAt(cursor),required=(at-cursor)*rate;
+    if(required>0)hasDemand=true;
+    if(rate>0 && balance+1e-8<required) {shortage=cursor-start+Math.max(0,balance)/rate;break;}
+    balance=Math.max(0,balance-required)+(deliveries.get(at)||0);cursor=at;
+  }
+  if(shortage===null) {
+    const rate=calendar.rateAt(cursor);
+    if(rate>0) {hasDemand=true;shortage=cursor-start+balance/rate;}
+  }
+  const daysLeft=daily>0?stock.estimated/daily:Infinity;
+  const orderIn=shortage===null?Infinity:Math.floor(shortage-a.lead-a.buffer);
   const horizon=a.lead+a.buffer+a.coverage;
-  const inbound=future.filter(d=>dayNumber(d.date)-dayNumber(asOf)<=horizon).reduce((s,d)=>s+d.kg,0);
-  const needed=Math.max(0,daily*horizon-stock.estimated-inbound);
+  const inbound=future.filter(d=>dayNumber(d.date)-start<=horizon).reduce((s,d)=>s+d.kg,0);
+  const requiredKg=calendar.demand(start,start+horizon);
+  const needed=Math.max(0,requiredKg-stock.estimated-inbound);
   const cartons=Math.max(0,Math.ceil(needed/a.pack-1e-10));
-  const urgent=daily>0 && shortage<a.lead;
-  return {...stock,daily,daysLeft,shortage,orderIn,overdue,cartons,orderKg:cartons*a.pack,piecesPerPack:a.pack*1000/a.weight,status:daily===0?'idle':urgent?'critical':orderIn<=0?'order':'ok'};
+  const urgent=shortage!==null&&shortage<a.lead;
+  return {...stock,daily,currentMonth,daysLeft,shortage,orderIn,overdue,cartons,requiredKg,orderKg:cartons*a.pack,piecesPerPack:a.pack*1000/a.weight,status:!hasDemand?'idle':urgent?'critical':orderIn<=0?'order':'ok'};
 }
 export function parseBackup(raw) {
   const data=JSON.parse(raw);
-  if(!data || ![1,2].includes(data.version) || !Array.isArray(data.articles) || data.articles.length>10000) throw new Error('Säkerhetskopians format stöds inte.');
+  if(!data || ![1,2,3].includes(data.version) || !Array.isArray(data.articles) || data.articles.length>10000) throw new Error('Säkerhetskopians format stöds inte.');
   const articles=data.articles.map(a=>{
-    if(data.version===1) {validateBase(a);return validateArticle({...a,stockDate:null,movements:[]});}
-    return validateArticle(a);
+    if(data.version===1) {validateBase(a);return validateArticle({...a,stockDate:null,movements:[],plans:{}});}
+    return validateArticle(data.version===2?{...a,plans:{}}:a);
   });
   if(!uniqueIds(articles)) throw new Error('Dubbla artikel-ID:n.');
   return articles;

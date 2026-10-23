@@ -1,17 +1,20 @@
-import { forecast, inventory, usageHistory, addMovement, voidMovement, today, dateAfter, validateArticle, parseBackup, validDate, SCHEMA_VERSION } from './model.js';
+import { forecast, inventory, usageHistory, addMovement, voidMovement, today, dateAfter, validateArticle, parseBackup, validDate, SCHEMA_VERSION, monthlyPlan, monthAfter, validMonth } from './model.js?v=3';
 const $ = s => document.querySelector(s);
-const key = 'spik.inventory.v2';
+const key = 'spik.inventory.v3';
+const previousKey = 'spik.inventory.v2';
 const legacyKey = 'spik.inventory.v1';
 const number = (n, digits=0) => new Intl.NumberFormat('sv-SE', {maximumFractionDigits:digits}).format(n);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pretty = d => new Intl.DateTimeFormat('sv-SE', {day:'numeric',month:'short',year:'numeric'}).format(new Date(`${d}T12:00:00`));
-const labels = {critical:'Risk för brist',order:'Dags att beställa',ok:'Lagret räcker',idle:'Ingen förbrukning',unconfirmed:'Bekräfta lagersaldo'};
+const labels = {critical:'Risk för brist',order:'Dags att beställa',ok:'Lagret räcker',idle:'Ingen förbrukning i prognosen',unconfirmed:'Bekräfta lagersaldo'};
 const movementNames = {usage:'Förbrukning',receipt:'Inleverans',count:'Inventering'};
 let articles = [], demo = false, draftDeliveries = [], storageBlocked = false, savedRaw = null;
 let stockId = null, receiptId = null, renderedDate = today();
+let view='stock',planStart=today().slice(0,7);
+const planDrafts=new Map();
 try {
   savedRaw = localStorage.getItem(key);
-  const raw = savedRaw ?? localStorage.getItem(legacyKey);
+  const raw = savedRaw ?? localStorage.getItem(previousKey) ?? localStorage.getItem(legacyKey);
   if (raw) { articles = parseBackup(raw); demo = JSON.parse(raw).demo === true; }
 } catch {
   storageBlocked = true;
@@ -50,13 +53,14 @@ function render() {
   rows.sort((x,y)=>$('#sort').value==='name'?x.a.name.localeCompare(y.a.name,'sv'):$('#sort').value==='stock'?(x.f.estimated??Infinity)-(y.f.estimated??Infinity):x.f.orderIn-y.f.orderIn || x.a.name.localeCompare(y.a.name,'sv'));
   $('#count').textContent=articles.length;
   $('#rows').innerHTML=rows.map(({a,f})=>{
-    const end=f.shortage===null?'—':f.shortage>36500?'> 100 år':pretty(dateAfter(today(),Math.floor(f.shortage)));
+    const end=f.shortage===null?'Ingen planerad brist':f.shortage>36500?'> 100 år':pretty(dateAfter(today(),Math.floor(f.shortage)));
     const order=!Number.isFinite(f.orderIn)?'—':f.orderIn<=0?'Beställ nu':f.orderIn>36500?'> 100 år':pretty(dateAfter(today(),f.orderIn));
     const stock=f.confirmed?`<strong>${number(f.estimated,1)} <small>kg</small></strong><span class="muted">Bokfört: ${number(f.ledger,1)} kg</span><span class="muted">Inventerat ${pretty(f.countDate)}</span>${f.deficit>0?'<span class="warning-text">Beräknat underskott — kontrollera lagret</span>':''}`:`<strong>—</strong><span class="muted">Tidigare saldo: ${number(a.stock,1)} kg</span><span class="warning-text">Bekräfta datum först</span>`;
-    return `<tr><td><button class="article-name" data-edit="${esc(a.id)}">${esc(a.name)}</button><span class="muted">${esc(a.group || 'Ingen grupp')} · ${esc(a.supplier || 'Ingen leverantör')}</span><span class="badge ${f.status}">${labels[f.status]}</span><button class="stock-shortcut" data-stock="${esc(a.id)}">Lager & historik</button></td><td>${stock}</td><td><strong>${number(f.daily*7,1)} <small>kg</small></strong><span class="muted">Planeringssnitt · ≈ ${number(f.daily*7*1000/a.weight)} st</span></td><td><strong>${end}</strong><span class="muted">${!f.confirmed?'Bekräfta lagersaldo':f.shortage===null?'Ange förbrukning':`om ${number(Math.floor(f.shortage))} dagar`}</span>${a.deliveries.length?`<span class="muted">${a.deliveries.length} planerade leveranser</span>`:''}${f.overdue.length?'<span class="warning-text">Kontrollera försenade leveranser</span>':''}</td><td><strong class="${f.orderIn<=0?'warning-text':''}">${order}</strong><span class="muted">Leveranstid ${a.lead} d + buffert ${a.buffer} d</span></td><td><strong>${f.orderKg===null?'—':`${number(f.orderKg)} <small>kg</small>`}</strong><span class="muted">${f.cartons===null?'Ange startsaldo':`${f.cartons} hela förpackningar`}</span>${f.status==='critical'?'<span class="warning-text">Tidigarelägg leveransen</span>':''}</td><td><div class="row-actions"><button data-edit="${esc(a.id)}" aria-label="Redigera ${esc(a.name)}">Redigera</button></div></td></tr>`;
+    return `<tr><td><button class="article-name" data-edit="${esc(a.id)}">${esc(a.name)}</button><span class="muted">${esc(a.group || 'Ingen grupp')} · ${esc(a.supplier || 'Ingen leverantör')}</span><span class="badge ${f.status}">${labels[f.status]}</span><button class="stock-shortcut" data-stock="${esc(a.id)}">Lager & historik</button></td><td>${stock}</td><td>${f.currentMonth.source==='plan'?`<strong>${number(f.currentMonth.plannedKg,1)} <small>kg / mån</small></strong><span class="muted">Månadsplan · ${number(f.currentMonth.pieces)} st</span>`:`<strong>${number(f.daily*7,1)} <small>kg / vecka</small></strong><span class="muted">${f.currentMonth.exceeded?'Plan överskriden · snitt används':'Snitt · ingen månadsplan'}</span>`}</td><td><strong>${end}</strong><span class="muted">${!f.confirmed?'Bekräfta lagersaldo':f.shortage===null?'Med sparad plan och snitt':`om ${number(Math.floor(f.shortage))} dagar`}</span>${a.deliveries.length?`<span class="muted">${a.deliveries.length} planerade leveranser</span>`:''}${f.overdue.length?'<span class="warning-text">Kontrollera försenade leveranser</span>':''}</td><td><strong class="${f.orderIn<=0?'warning-text':''}">${order}</strong><span class="muted">Leveranstid ${a.lead} d + buffert ${a.buffer} d</span></td><td><strong>${f.orderKg===null?'—':`${number(f.orderKg)} <small>kg</small>`}</strong><span class="muted">${f.cartons===null?'Ange startsaldo':`${f.cartons} hela förpackningar`}</span>${f.status==='critical'?'<span class="warning-text">Tidigarelägg leveransen</span>':''}</td><td><div class="row-actions"><button data-edit="${esc(a.id)}" aria-label="Redigera ${esc(a.name)}">Redigera</button></div></td></tr>`;
   }).join('');
   $('#empty').hidden=articles.length>0;
   if(articles.length && !rows.length) $('#rows').innerHTML='<tr><td colspan="7" class="no-results">Inga artiklar matchar dina filter.</td></tr>';
+  if(view==='plan')renderPlan();
 }
 const form=$('#article-form');
 const field=name=>form.elements.namedItem(name);
@@ -65,7 +69,7 @@ function deliveryRows() {
   $('#deliveries').innerHTML=draftDeliveries.map((d,i)=>`<div class="delivery"><label>Leveransdatum<input type="date" data-date="${i}" value="${esc(d.date)}" required></label><label>Mängd (kg)<input type="number" min="0.000001" step="any" data-kg="${i}" value="${d.kg}" required></label><button type="button" data-remove="${i}" aria-label="Ta bort leverans">×</button></div>`).join('');
 }
 function edit(id) {
-  const a=articles.find(a=>a.id===id) || {id:'',name:'',group:'',supplier:'',weight:1.8,pack:800,stock:0,stockDate:today(),usage:0,unit:'kg',period:'week',lead:42,buffer:14,coverage:30,notes:'',deliveries:[],movements:[]};
+  const a=articles.find(a=>a.id===id) || {id:'',name:'',group:'',supplier:'',weight:1.8,pack:800,stock:0,stockDate:today(),usage:0,unit:'kg',period:'week',lead:42,buffer:14,coverage:30,notes:'',deliveries:[],movements:[],plans:{}};
   form.reset();
   for(const name of ['id','name','group','supplier','weight','pack','stock','stockDate','usage','unit','period','lead','buffer','coverage','notes']) field(name).value=a[name]??'';
   const locked=Boolean(id && a.stockDate);
@@ -85,13 +89,13 @@ form.onsubmit=e=>{
   e.preventDefault();const a=Object.fromEntries(new FormData(form));
   const previous=articles.find(x=>x.id===a.id);
   for(const name of ['weight','pack','stock','usage','lead','buffer','coverage'])a[name]=Number(a[name]);
-  a.id ||= crypto.randomUUID(); a.movements=structuredClone(previous?.movements||[]); a.deliveries=structuredClone(draftDeliveries);
+  a.id ||= crypto.randomUUID(); a.plans=structuredClone(previous?.plans||{}); a.movements=structuredClone(previous?.movements||[]); a.deliveries=structuredClone(draftDeliveries);
   if(previous?.stockDate){a.stock=previous.stock;a.stockDate=previous.stockDate;}
   try {validateArticle(a);if(a.stockDate>today())throw new Error('Startsaldot får inte ligga i framtiden.');}catch(err){alert(err.message);return;}
   const next=previous?articles.map(x=>x.id===a.id?a:x):[...articles,a];
   if(persist(next)){ $('#editor').close();notify('Artikeln har sparats'); }
 };
-$('#delete').onclick=()=>{if(confirm(`Ta bort artikeln ”${field('name').value}”, hela lagerhistoriken och leveransplanen? Exportera en säkerhetskopia först.`)&&persist(articles.filter(a=>a.id!==field('id').value))){$('#editor').close();notify('Artikeln har tagits bort');}};
+$('#delete').onclick=()=>{const id=field('id').value;if(confirm(`Ta bort artikeln ”${field('name').value}”, hela lagerhistoriken, månadsplanen och leveransplanen? Exportera en säkerhetskopia först.`)&&persist(articles.filter(a=>a.id!==id))){planDrafts.delete(id);if(view==='plan')renderPlan();$('#editor').close();notify('Artikeln har tagits bort');}};
 
 const movementForm=$('#movement-form');
 const mf=name=>movementForm.elements.namedItem(name);
@@ -167,6 +171,7 @@ $('#actual-average').onclick=e=>{
   if(confirm(`Använd ${number(actual.weekly,2)} kg per vecka som planeringssnitt? Uppskattad förbrukning för dagar utan registrerade uttag och inköpsprognosen räknas om.`) && replaceArticle({...a,usage:actual.weekly,unit:'kg',period:'week'})){renderStock();notify('Planeringssnittet har uppdaterats');}
 };
 $('#export').onclick=()=>{
+  if(planDrafts.size){alert('Spara eller återställ dina planändringar innan du exporterar en säkerhetskopia.');return;}
   const blob=new Blob([JSON.stringify({version:SCHEMA_VERSION,exportedAt:new Date().toISOString(),articles,demo},null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`spik-backup-${today()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
@@ -176,15 +181,78 @@ $('#file').onchange=async e=>{
   try {
     if(file.size>10_000_000)throw new Error('Filen är för stor (max 10 MB).');
     const raw=await file.text(),next=parseBackup(raw);
-    if(confirm(`Importen ersätter alla nuvarande artiklar (${articles.length}) och deras historik med kopians (${next.length}). Har du en säkerhetskopia och vill fortsätta? Äldre kopior utan saldodatum kräver bekräftelse.`))if(persist(next,JSON.parse(raw).demo===true))notify('Säkerhetskopian har importerats');
+    if(confirm(`Importen ersätter alla nuvarande artiklar (${articles.length}) och deras historik och månadsplaner med kopians (${next.length}). Har du en säkerhetskopia och vill fortsätta? Äldre kopior utan saldodatum kräver bekräftelse.`))if(persist(next,JSON.parse(raw).demo===true)){planDrafts.clear();if(view==='plan')renderPlan();notify('Säkerhetskopian har importerats');}
   }catch(err){alert(`Importen misslyckades: ${err.message}`);}finally{e.target.value='';}
 };
 $('#demo').onclick=()=>{
-  const base={weight:1.8,pack:800,stockDate:today(),movements:[],unit:'kg',period:'week',lead:42,buffer:14,coverage:30,notes:'Exempelartikel — ersätt med verkliga uppgifter.',deliveries:[]};
+  const base={weight:1.8,pack:800,stockDate:today(),movements:[],plans:{},unit:'kg',period:'week',lead:42,buffer:14,coverage:30,notes:'Exempelartikel — ersätt med verkliga uppgifter.',deliveries:[]};
   persist([{...base,id:crypto.randomUUID(),name:'2,5 × 45 Slätt',group:'Slät spik',supplier:'Leverantör A',stock:900,usage:210},{...base,id:crypto.randomUUID(),name:'2,8 × 75 Ring',group:'Ringspik',supplier:'Leverantör B',weight:3.2,stock:2400,usage:280},{...base,id:crypto.randomUUID(),name:'3,1 × 90 Ring',group:'Ringspik',supplier:'Leverantör B',weight:4.5,stock:4000,usage:180}],true);
 };
-$('#clear-demo').onclick=()=>{if(confirm('Ta bort alla demouppgifter, inklusive dina ändringar? Exportera först de uppgifter du vill behålla.'))persist([],false);};
-window.addEventListener('storage',e=>{if(e.key===key || e.key===null)location.reload();});
+$('#clear-demo').onclick=()=>{if(confirm('Ta bort alla demouppgifter, inklusive dina ändringar? Exportera först de uppgifter du vill behålla.')&&persist([],false)){planDrafts.clear();if(view==='plan')renderPlan();}};
+window.addEventListener('storage',e=>{if(e.key===key || e.key===null){if(planDrafts.size){$('#storage-warning').hidden=false;$('#storage-warning').textContent='Uppgifterna har ändrats i en annan flik. Dina planändringar är kvar på skärmen men kan inte sparas över den andra versionen. Säkra dina anteckningar och ladda om sidan.';}else location.reload();}});
 function refreshDate(){if(renderedDate!==today()){render();if($('#stock-dialog').open)renderStock();}}
 window.addEventListener('focus',refreshDate);document.addEventListener('visibilitychange',refreshDate);setInterval(refreshDate,60000);
+function setView(next) {
+  view=next;$('#inventory-view').hidden=next!=='stock';$('#plan-view').hidden=next!=='plan';
+  for(const [id,active] of [['nav-stock',next==='stock'],['nav-plan',next==='plan']]) {const button=$(`#${id}`);button.classList.toggle('nav-active',active);if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
+  $('#page-title').innerHTML=next==='plan'?'Planera månad för månad<span>.</span>':'Full koll på lagret<span>.</span>';
+  $('#page-subtitle').textContent=next==='plan'?'Från produktionsbehov i stycken till rätt mängd spik i lager.':'Vet vad du behöver beställa. Innan produktionen stannar.';
+  if(next==='plan')renderPlan();
+}
+$('#nav-stock').onclick=()=>setView('stock');$('#nav-plan').onclick=()=>setView('plan');
+function planMonths(){return Array.from({length:6},(_,i)=>monthAfter(planStart,i));}
+function visiblePlanArticles(){const query=$('#plan-search').value.trim().toLocaleLowerCase('sv'),group=$('#plan-group').value;return articles.filter(a=>(!query||`${a.name} ${a.supplier} ${a.group}`.toLocaleLowerCase('sv').includes(query))&&(!group||a.group===group)).sort((a,b)=>a.name.localeCompare(b.name,'sv'));}
+function draftValue(a,month){return planDrafts.get(a.id)?.get(month)??(Object.hasOwn(a.plans,month)?String(a.plans[month]):'');}
+function validPlanValue(value){return value===''||(value.trim()!==''&&Number.isSafeInteger(Number(value))&&Number(value)>=0&&Number(value)<=1e12);}
+function previewArticle(a){const plans={...a.plans};for(const [month,value] of planDrafts.get(a.id)||[]){if(value==='')delete plans[month];else if(validPlanValue(value))plans[month]=Number(value);}return {...a,plans};}
+function planCellInfo(a,month,value){
+  if(!validPlanValue(value))return '<span class="warning-text">Ange hela stycken, minst 0.</span>';
+  const p=monthlyPlan(previewArticle(a),month);
+  const converted=p.pieces===null?`${number(p.totalKg,1)} kg · snitt`:`${number(p.plannedKg,1)} kg · plan`;
+  return `<span class="cell-conversion">${converted}</span>${p.recordedDays?`<span class="muted">Utfall: ${number(p.actualKg,1)} kg · ${p.recordedDays} d</span>`:''}${month>=today().slice(0,7)?`<span class="muted">${month===today().slice(0,7)?'Från idag':'Prognos'}: ${number(p.forecastKg,1)} kg</span>`:''}${p.exceeded?`<span class="warning-text">Plan överskriden · snitt används${p.rate===0?' (0 kg — kontrollera planen eller snittet)':''}</span>`:''}`;
+}
+function updatePlanStatus(){
+  const count=[...planDrafts.values()].reduce((sum,map)=>sum+map.size,0);
+  $('#plan-save-status').textContent=count?`${count} osparade ${count===1?'ändring':'ändringar'}`:'Alla ändringar sparade';
+  $('#plan-save-status').classList.toggle('unsaved',count>0);$('#plan-save').disabled=!count;$('#plan-discard').disabled=!count;
+}
+function renderPlanTotals(){
+  const rows=visiblePlanArticles();
+  $('#plan-totals').innerHTML=`<tr><th>Prognos totalt · kg<span class="muted">Visade artiklar · plan / snitt</span></th>${planMonths().map(month=>{let total=0;for(const a of rows){if(!validPlanValue(draftValue(a,month)))return '<td>—</td>';const p=monthlyPlan(previewArticle(a),month);total+=p.totalKg;}return `<td>${number(total,1)} <small>kg</small></td>`;}).join('')}</tr>`;
+}
+function renderPlan(){
+  $('#plan-start').value=planStart;
+  $('#plan-prev').disabled=monthAfter(planStart,-6)<'1900-01';$('#plan-next').disabled=monthAfter(planStart,6)>'9998-07';
+  const selected=$('#plan-group').value;
+  $('#plan-group').innerHTML='<option value="">Alla grupper</option>'+[...new Set(articles.map(a=>a.group).filter(Boolean))].sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');$('#plan-group').value=selected;
+  const months=planMonths(),rows=visiblePlanArticles();
+  const label=month=>new Intl.DateTimeFormat('sv-SE',{month:'long',year:'numeric'}).format(new Date(`${month}-01T12:00:00`));
+  $('#plan-head').innerHTML=`<tr><th>ARTIKEL<span class="muted">Vikt per spik · förpackning</span></th>${months.map(month=>`<th class="${month===today().slice(0,7)?'current-month':''}">${esc(label(month))}<span class="muted">Planerad förbrukning · st</span></th>`).join('')}</tr>`;
+  $('#plan-rows').innerHTML=rows.map(a=>`<tr><td><strong>${esc(a.name)}</strong><span class="muted">${number(a.weight,3)} g / st · ${number(a.pack)} kg / förp.</span><span class="muted">${esc(a.group||'Ingen grupp')} · ${esc(a.supplier||'Ingen leverantör')}</span></td>${months.map(month=>{const value=draftValue(a,month);return `<td class="plan-cell ${value===''?'from-average':'from-plan'}" data-article="${esc(a.id)}" data-month="${month}"><div class="plan-input"><input type="number" min="0" max="1000000000000" step="1" inputmode="numeric" value="${validPlanValue(value)?esc(value):''}" placeholder="Snitt" aria-label="${esc(a.name)} · ${esc(label(month))} · stycken"><span>st</span></div><div class="plan-cell-info">${planCellInfo(a,month,value)}</div></td>`;}).join('')}</tr>`).join('');
+  if(articles.length&&!rows.length)$('#plan-rows').innerHTML='<tr><td colspan="7" class="no-results">Inga artiklar matchar dina filter.</td></tr>';
+  $('#plan-empty').hidden=articles.length>0;renderPlanTotals();updatePlanStatus();
+}
+$('#plan-rows').oninput=e=>{
+  const cell=e.target.closest('.plan-cell');if(!cell)return;
+  const a=articles.find(a=>a.id===cell.dataset.article),month=cell.dataset.month;
+  const value=e.target.validity.badInput?'!':e.target.value;
+  const original=Object.hasOwn(a.plans,month)?String(a.plans[month]):'';
+  if(value===original || (value!==''&&validPlanValue(value)&&Number(value)===Number(original)&&original!=='')){planDrafts.get(a.id)?.delete(month);if(planDrafts.get(a.id)?.size===0)planDrafts.delete(a.id);}else{if(!planDrafts.has(a.id))planDrafts.set(a.id,new Map());planDrafts.get(a.id).set(month,value);}
+  cell.classList.toggle('from-average',value==='');cell.classList.toggle('from-plan',value!=='');e.target.setAttribute('aria-invalid',String(!validPlanValue(value)));
+  cell.querySelector('.plan-cell-info').innerHTML=planCellInfo(a,month,value);renderPlanTotals();updatePlanStatus();
+};
+$('#plan-form').onsubmit=e=>{e.preventDefault();savePlans();};
+function savePlans(){
+  for(const [id,months] of planDrafts)for(const [month,value] of months)if(!validPlanValue(value)){alert(`Kontrollera planen för ${articles.find(a=>a.id===id)?.name||'artikeln'}, ${month}. Ange hela stycken mellan 0 och 1 000 000 000 000.`);return false;}
+  if(!planDrafts.size)return true;
+  const next=articles.map(previewArticle);
+  if(persist(next)){planDrafts.clear();renderPlan();notify('Månadsplanen har sparats. Lagerprognosen är uppdaterad.');return true;}return false;
+}
+$('#plan-save').onclick=savePlans;
+$('#plan-discard').onclick=()=>{if(confirm('Återställ alla osparade planändringar, även i andra månader och filter?')){planDrafts.clear();renderPlan();}};
+$('#plan-prev').onclick=()=>{planStart=monthAfter(planStart,-6);renderPlan();};$('#plan-next').onclick=()=>{planStart=monthAfter(planStart,6);renderPlan();};$('#plan-today').onclick=()=>{planStart=today().slice(0,7);renderPlan();};
+$('#plan-start').onchange=e=>{if(validMonth(e.target.value)&&e.target.value<='9998-07'){planStart=e.target.value;renderPlan();}else e.target.value=planStart;};
+$('#plan-search').oninput=renderPlan;$('#plan-group').onchange=renderPlan;
+window.addEventListener('beforeunload',e=>{if(planDrafts.size){e.preventDefault();e.returnValue='';}});
+
 render();
