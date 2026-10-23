@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { forecast, parseBackup, validateArticle, dateAfter, inventory, usageHistory, addMovement, voidMovement, monthlyPlan, monthAfter } from '../src/model.js';
+import { forecast, parseBackup, validateArticle, dateAfter, inventory, usageHistory, addMovement, voidMovement, monthlyPlan, monthAfter, validateProduct, validateData, deriveArticles, deriveArticle, parseData, productNails } from '../src/model.js';
 const base = {id:'1',name:'2,5 × 45 Slätt',weight:1.8,pack:800,stock:800,stockDate:'2026-10-19',movements:[],plans:{},usage:140,unit:'kg',period:'week',lead:42,buffer:14,coverage:30,group:'Gładkie',supplier:'',notes:'',deliveries:[]};
 const date='2026-10-19';
 test('800 kg / 1.8 g and ordering whole cartons',()=>{const f=forecast(base,date);assert.ok(Math.abs(f.piecesPerPack-444444.444444)<0.001);assert.equal(f.daysLeft,40);assert.equal(f.orderIn,-16);assert.equal(f.status,'critical');assert.equal(f.orderKg,1600);assert.equal(f.cartons,2);});
@@ -12,7 +12,7 @@ test('delivery on depletion day prevents gap',()=>{assert.equal(forecast({...bas
 test('zero consumption',()=>{const f=forecast({...base,usage:0},date);assert.equal(f.shortage,null);assert.equal(f.orderKg,0);assert.equal(f.status,'idle');});
 test('zero stock',()=>{assert.equal(forecast({...base,stock:0},date).shortage,0);assert.equal(forecast({...base,stock:0},date).status,'critical');});
 test('reorder boundary and exact cartons',()=>{const f=forecast({...base,stock:1120,coverage:40},date);assert.equal(f.orderIn,0);assert.equal(f.status,'order');assert.equal(f.orderKg,800);});
-test('backup validation',()=>{assert.deepEqual(parseBackup(JSON.stringify({version:2,articles:[base]})),[base]);assert.throws(()=>parseBackup(JSON.stringify({version:2,articles:[base,base]})));assert.throws(()=>validateArticle({...base,weight:0}));assert.throws(()=>validateArticle({...base,stock:-1}));assert.throws(()=>validateArticle({...base,deliveries:[{id:'d',date:'2026-02-30',kg:10}]}));assert.throws(()=>parseBackup('{"version":4,"articles":[]}'));});
+test('backup validation',()=>{assert.deepEqual(parseBackup(JSON.stringify({version:2,articles:[base]})),[base]);assert.throws(()=>parseBackup(JSON.stringify({version:2,articles:[base,base]})));assert.throws(()=>validateArticle({...base,weight:0}));assert.throws(()=>validateArticle({...base,stock:-1}));assert.throws(()=>validateArticle({...base,deliveries:[{id:'d',date:'2026-02-30',kg:10}]}));assert.throws(()=>parseBackup('{"version":5,"articles":[]}'));});
 
 const usage=(id,from,date,kg)=>({id,type:'usage',from,date,kg,note:'Produktion',voided:false});
 const receipt=(id,date,kg)=>({id,type:'receipt',date,kg,note:'Leverans',voided:false});
@@ -198,4 +198,76 @@ test('completed actual month overrides unconsumed planned amounts in totals',()=
   const a={...base,stockDate:'2026-11-01',plans:{'2026-11':500000},movements:[usage('u','2026-11-01','2026-11-30',100)]};
   const p=monthlyPlan(a,'2026-11','2026-12-01');
   assert.equal(p.plannedKg,900);assert.equal(p.actualKg,100);assert.equal(p.totalKg,100);assert.equal(p.forecastKg,0);
+});
+
+const nailB={...base,id:'nail-b',name:'Ring',weight:3.2};
+const product={id:'product-1006',name:'1006',notes:'Pall',recipe:{deck:{articleId:'1',pieces:18},runners:{articleId:'1',pieces:12},assembly:{articleId:'nail-b',pieces:8}},plans:{'2026-11':1000}};
+test('product recipe merges the same nail used in several operations',()=>{
+  validateProduct(product,[base,nailB]);assert.deepEqual([...productNails(product)],[['1',30],['nail-b',8]]);
+  const [a,b]=deriveArticles([base,nailB],[product]);assert.equal(a.plans['2026-11'],30000);assert.equal(b.plans['2026-11'],8000);
+  assert.equal(monthlyPlan(a,'2026-11',date).plannedKg,54);assert.equal(monthlyPlan(b,'2026-11',date).plannedKg,25.6);
+});
+test('multiple products sum usage for the same nail and month',()=>{
+  const p2={...structuredClone(product),id:'product-1007',name:'1007',plans:{'2026-11':500}};
+  const [a,b]=deriveArticles([base,nailB],[product,p2]);assert.equal(a.plans['2026-11'],45000);assert.equal(b.plans['2026-11'],12000);
+  assert.equal(a.productionSources['2026-11'].length,2);
+});
+test('generated consumption overrides, preserves and restores manual plans',()=>{
+  const a={...base,plans:{'2026-11':500000,'2026-12':200000}};
+  const result=deriveArticle(a,[product]);assert.equal(result.plans['2026-11'],30000);assert.equal(result.plans['2026-12'],200000);
+  assert.equal(a.plans['2026-11'],500000);assert.deepEqual(deriveArticle(a,[]).plans,a.plans);
+  assert.equal(monthlyPlan(result,'2026-11',date).production[0].productName,'1006');
+});
+test('zero production explicitly overrides manual plans; blank production does not',()=>{
+  const a={...base,plans:{'2026-11':500000}};
+  assert.equal(deriveArticle(a,[{...product,plans:{'2026-11':0}}]).plans['2026-11'],0);
+  assert.equal(deriveArticle(a,[{...product,plans:{}}]).plans['2026-11'],500000);
+  const unused={...base,id:'unused'};assert.equal(Object.hasOwn(deriveArticle(unused,[product]).plans,'2026-11'),false);
+});
+test('recipes may omit an operation but must contain at least one positive nail quantity',()=>{
+  const p=structuredClone(product);p.recipe.assembly={articleId:null,pieces:0};validateProduct(p,[base]);
+  assert.equal(deriveArticle(base,[p]).plans['2026-11'],30000);
+  for(const [key] of [['deck'],['runners']])p.recipe[key]={articleId:null,pieces:0};
+  assert.throws(()=>validateProduct(p,[base]),/minst en/);
+});
+test('reject recipes with missing nails, invalid counts, or a selected nail with zero count',()=>{
+  assert.throws(()=>validateProduct(product,[base]));
+  for(const row of [{articleId:'1',pieces:0},{articleId:null,pieces:5},{articleId:'1',pieces:1.5},{articleId:'missing',pieces:5}]){
+    const p=structuredClone(product);p.recipe.deck=row;assert.throws(()=>validateProduct(p,[base,nailB]));
+  }
+});
+test('product IDs and names must be unique, including case and surrounding spaces',()=>{
+  assert.throws(()=>validateData([base,nailB],[product,product]));
+  assert.throws(()=>validateData([base,nailB],[product,{...product,id:'other',name:' 1006 '}]));
+});
+test('invalid months, negative production, fractional units and excessive aggregates are rejected',()=>{
+  for(const plans of [{'2026-13':1},{'2026-11':-1},{'2026-11':1.5},{'2026-11':1e10}])assert.throws(()=>validateData([base,nailB],[{...product,plans}]));
+  const p=structuredClone(product);p.recipe.deck.pieces=1000000;p.plans['2026-11']=1000000000;
+  assert.throws(()=>validateData([base,nailB],[p]),/För stor/);
+});
+test('editing a recipe updates planned demand, not booked stock or actual usage',()=>{
+  const a={...base,movements:[usage('u','2026-10-19','2026-10-21',90)]};
+  const p=structuredClone(product);p.recipe.deck.pieces=20;
+  const result=deriveArticle(a,[p]);assert.equal(result.plans['2026-11'],32000);assert.equal(inventory(result,'2026-10-23').ledger,710);
+  assert.deepEqual(result.movements,a.movements);assert.deepEqual(a.plans,{});
+});
+test('production-derived plans drive stock depletion and purchase quantity',()=>{
+  const a={...base,stock:10,usage:0,lead:21,buffer:0,coverage:30};
+  const result=deriveArticle(a,[product]);const f=forecast(result,'2026-10-23');
+  close(f.requiredKg,54);assert.equal(f.orderKg,800);assert.equal(f.status,'critical');close(f.shortage,9+10/(54/30));
+});
+test('v4 backup preserves products, manual plans and histories without persisting generated values',()=>{
+  const a={...base,plans:{'2026-11':500000},movements:[usage('u',date,date,10)]};
+  const raw=JSON.stringify({version:4,articles:[a,nailB],products:[product]});
+  const data=parseData(raw);assert.deepEqual(data.articles,[a,nailB]);assert.deepEqual(data.products,[product]);assert.equal(data.articles[0].productionSources,undefined);
+  assert.equal(deriveArticle(data.articles[0],data.products).plans['2026-11'],30000);
+  assert.equal(data.articles[0].plans['2026-11'],500000);
+});
+test('v3 migration preserves existing plans and actual history and starts with no products',()=>{
+  const a={...base,plans:{'2026-11':500000},movements:[usage('u',date,date,10)]};
+  assert.deepEqual(parseData(JSON.stringify({version:3,articles:[a]})),{articles:[a],products:[]});
+});
+test('full-state import rejects dangling recipe references and absent v4 product lists',()=>{
+  assert.throws(()=>parseData(JSON.stringify({version:4,articles:[base],products:[product]})));
+  assert.throws(()=>parseData(JSON.stringify({version:4,articles:[base]})));
 });

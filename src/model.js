@@ -1,5 +1,5 @@
 export const DAY = 86400000;
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export function today() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 export function dayNumber(date) { return Date.parse(`${date}T00:00:00Z`) / DAY; }
 export function dateAfter(date, days) { return new Date((dayNumber(date) + days) * DAY).toISOString().slice(0,10); }
@@ -60,7 +60,7 @@ function consumptionCalendar(a,asOf) {
     const rate=pieces===null||exceeded?dailyUsage(a):unrecordedDays>0?remainingKg/unrecordedDays:0;
     const pendingStart=Math.max(start,dayNumber(asOf));
     const pendingDays=Math.max(0,end-pendingStart)-actual.reduce((sum,m)=>sum+overlap(m.start,m.end,pendingStart,end),0);
-    const value={month,pieces,plannedKg,actualKg,recordedDays,remainingKg,rate,exceeded,totalKg:actualKg+rate*unrecordedDays,source:pieces===null?'average':exceeded?'exceeded':'plan',forecastKg:Math.max(0,pendingDays)*rate};
+    const value={month,pieces,plannedKg,actualKg,recordedDays,remainingKg,rate,exceeded,totalKg:actualKg+rate*unrecordedDays,production:a.productionSources?.[month]||null,source:pieces===null?'average':exceeded?'exceeded':'plan',forecastKg:Math.max(0,pendingDays)*rate};
     profiles.set(month,value);return value;
   }
   function missingDays(start,end) { return end-start-actual.reduce((sum,m)=>sum+overlap(m.start,m.end,start,end),0); }
@@ -171,9 +171,8 @@ export function forecast(a, asOf = today()) {
   const urgent=shortage!==null&&shortage<a.lead;
   return {...stock,daily,currentMonth,daysLeft,shortage,orderIn,overdue,cartons,requiredKg,orderKg:cartons*a.pack,piecesPerPack:a.pack*1000/a.weight,status:!hasDemand?'idle':urgent?'critical':orderIn<=0?'order':'ok'};
 }
-export function parseBackup(raw) {
-  const data=JSON.parse(raw);
-  if(!data || ![1,2,3].includes(data.version) || !Array.isArray(data.articles) || data.articles.length>10000) throw new Error('Säkerhetskopians format stöds inte.');
+function parseArticles(data) {
+  if(!data || ![1,2,3,4].includes(data.version) || !Array.isArray(data.articles) || data.articles.length>10000) throw new Error('Säkerhetskopians format stöds inte.');
   const articles=data.articles.map(a=>{
     if(data.version===1) {validateBase(a);return validateArticle({...a,stockDate:null,movements:[],plans:{}});}
     return validateArticle(data.version===2?{...a,plans:{}}:a);
@@ -181,3 +180,66 @@ export function parseBackup(raw) {
   if(!uniqueIds(articles)) throw new Error('Dubbla artikel-ID:n.');
   return articles;
 }
+
+export const PRODUCT_STAGES=[['deck','Däck'],['runners','Medar'],['assembly','Sammansättning']];
+export function validateProduct(p,articles) {
+  if(!p || typeof p.id!=='string' || !p.id || typeof p.name!=='string' || !p.name.trim() || p.name.length>120 || typeof p.notes!=='string') throw new Error('Produkten måste ha ett namn eller artikelnummer.');
+  if(!p.recipe || typeof p.recipe!=='object' || Array.isArray(p.recipe) || Object.keys(p.recipe).length!==3) throw new Error('Produkten måste ha tre spikoperationer.');
+  const ids=new Set(articles.map(a=>a.id));let total=0;
+  for(const [key,label] of PRODUCT_STAGES) {
+    const row=p.recipe[key];
+    if(!row || !Number.isSafeInteger(row.pieces) || row.pieces<0 || row.pieces>1000000) throw new Error(`Ange hela spikar per produkt för ${label} (0–1 000 000).`);
+    if(row.articleId===null) {if(row.pieces!==0)throw new Error(`Välj spik för ${label}.`);}
+    else if(typeof row.articleId!=='string' || !ids.has(row.articleId) || row.pieces===0) throw new Error(`Välj en befintlig spik och ett antal större än 0 för ${label}.`);
+    total+=row.pieces;
+  }
+  if(total===0)throw new Error('Välj minst en spik med förbrukning per produkt.');
+  if(!p.plans || typeof p.plans!=='object' || Array.isArray(p.plans))throw new Error('Ogiltig produktionsplan.');
+  for(const [month,quantity] of Object.entries(p.plans))if(!validMonth(month)||!Number.isSafeInteger(quantity)||quantity<0||quantity>1000000000)throw new Error('Produktionsplanen ska innehålla hela produkter, 0–1 000 000 000 per månad.');
+  return p;
+}
+export function validateData(articles,products) {
+  if(!Array.isArray(articles)||articles.length>10000)throw new Error('Ogiltig spiklista (högst 10 000 artiklar).');
+  articles.forEach(validateArticle);
+  if(!uniqueIds(articles))throw new Error('Dubbla spik-ID:n.');
+  if(!Array.isArray(products)||products.length>10000||!uniqueIds(products))throw new Error('Ogiltig produktlista eller dubbla produkt-ID:n.');
+  const names=new Set();
+  for(const p of products){validateProduct(p,articles);const name=p.name.trim().toLocaleLowerCase('sv-SE');if(names.has(name))throw new Error('Produktnamn eller artikelnummer måste vara unika.');names.add(name);}
+  deriveArticles(articles,products); // Also reject unsafe aggregate quantities before saving.
+}
+export function productNails(p) {
+  const result=new Map();
+  for(const [key] of PRODUCT_STAGES){const row=p.recipe[key];if(row.articleId)result.set(row.articleId,(result.get(row.articleId)||0)+row.pieces);}
+  return result;
+}
+function appendProduction(a,p,perProduct) {
+  for(const [month,quantity] of Object.entries(p.plans)) {
+    const pieces=quantity*perProduct;
+    if(!a.productionSources[month]){a.productionSources[month]=[];a.plans[month]=0;}
+    const sum=a.plans[month]+pieces;
+    if(!Number.isSafeInteger(sum)||sum>1e12)throw new Error(`För stor spikmängd i produktionsplanen för ${a.name}, ${month}.`);
+    a.plans[month]=sum;
+    a.productionSources[month].push({productId:p.id,productName:p.name,quantity,perProduct,pieces});
+  }
+}
+export function deriveArticle(a,products=[]) {
+  const result={...a,plans:{...a.plans},productionSources:{}};
+  for(const p of products){const perProduct=productNails(p).get(a.id);if(perProduct)appendProduction(result,p,perProduct);}
+  return result;
+}
+export function deriveArticles(articles,products=[]) {
+  const result=articles.map(a=>({...a,plans:{...a.plans},productionSources:{}}));
+  const byId=new Map(result.map(a=>[a.id,a]));
+  for(const p of products)for(const [id,perProduct] of productNails(p)) {
+    const a=byId.get(id);if(!a)throw new Error(`Produkten ${p.name} hänvisar till en spik som saknas.`);
+    appendProduction(a,p,perProduct);
+  }
+  return result;
+}
+export function parseData(raw) {
+  const data=JSON.parse(raw),articles=parseArticles(data);
+  const products=data.version===4?data.products:[];
+  validateData(articles,products);
+  return {articles,products};
+}
+export function parseBackup(raw) { return parseData(raw).articles; }
